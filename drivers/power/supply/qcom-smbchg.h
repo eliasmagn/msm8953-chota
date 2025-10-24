@@ -252,6 +252,10 @@ struct smbchg_chip {
 
 	const struct smbchg_data *data;
 
+	/* Charge-through while OTG host (runtime + DT configurable) */
+	bool allow_charge_while_otg;
+	u32 otg_charge_icl_ua;   /* microamps; default 500000 */
+
 	bool smbchg_lite;
 };
 

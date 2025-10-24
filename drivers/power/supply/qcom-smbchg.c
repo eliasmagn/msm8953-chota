@@ -13,6 +13,8 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/sysfs.h>
+#include <linux/uaccess.h>
 #include <linux/of_irq.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
@@ -697,6 +699,116 @@ static bool smbchg_otg_is_present(struct smbchg_chip *chip)
 	return (value & RID_MASK) == 0;
 }
 
+/* ===== Charge-through while OTG host (safe mode) =====
+ * If ID is grounded (host mode) AND USB VBUS is externally present,
+ * do NOT source VBUS. Instead, enable the USB sink path and set a
+ * conservative ICL so the PMIC can charge from the external source.
+ * This behavior is gated by allow_charge_while_otg (sysfs/DT).
+ */
+
+#ifndef SMBCHG_DEFAULT_OTG_CHARGE_ICL
+#define SMBCHG_DEFAULT_OTG_CHARGE_ICL 500000 /* 500 mA default */
+#endif
+
+static bool smbchg_is_charge_through_otg(struct smbchg_chip *chip)
+{
+	if (!chip->allow_charge_while_otg)
+		return false;
+
+	/* Host cable present AND external VBUS present */
+	return smbchg_otg_is_present(chip) && smbchg_usb_is_present(chip);
+}
+
+static void smbchg_update_charge_through_otg(struct smbchg_chip *chip)
+{
+	int ret;
+
+	if (!smbchg_is_charge_through_otg(chip))
+		return;
+
+	/* Ensure we are NOT sourcing VBUS */
+	regmap_update_bits(chip->regmap,
+			   chip->base + SMBCHG_BAT_IF_CMD_CHG,
+			   OTG_EN_BIT, 0);
+
+	/* Enable sink path and apply ICL */
+	ret = smbchg_usb_enable(chip, true);
+	if (ret)
+		dev_warn(chip->dev,
+			 "OTG+charge: enable USB sink failed: %pe\n",
+			 ERR_PTR(ret));
+
+	ret = smbchg_usb_set_ilim(chip, chip->otg_charge_icl_ua ?
+			       chip->otg_charge_icl_ua :
+			       SMBCHG_DEFAULT_OTG_CHARGE_ICL);
+	if (ret < 0)
+		dev_warn(chip->dev,
+			 "OTG+charge: set ICL failed: %pe\n",
+			 ERR_PTR(ret));
+}
+
+/* ---- sysfs controls on the platform device ---- */
+static ssize_t allow_charge_while_otg_show(struct device *dev,
+				   struct device_attribute *attr,
+				   char *buf)
+{
+	struct smbchg_chip *chip = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", chip->allow_charge_while_otg);
+}
+
+static ssize_t allow_charge_while_otg_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct smbchg_chip *chip = dev_get_drvdata(dev);
+	bool v;
+
+	if (kstrtobool(buf, &v))
+		return -EINVAL;
+
+	chip->allow_charge_while_otg = v;
+	smbchg_update_charge_through_otg(chip);
+
+	return count;
+}
+static DEVICE_ATTR_RW(allow_charge_while_otg);
+
+static ssize_t otg_charge_icl_ua_show(struct device *dev,
+			      struct device_attribute *attr,
+			      char *buf)
+{
+	struct smbchg_chip *chip = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", chip->otg_charge_icl_ua ?
+			    chip->otg_charge_icl_ua :
+			    SMBCHG_DEFAULT_OTG_CHARGE_ICL);
+}
+
+static ssize_t otg_charge_icl_ua_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	struct smbchg_chip *chip = dev_get_drvdata(dev);
+	u32 ua;
+
+	if (kstrtou32(buf, 0, &ua))
+		return -EINVAL;
+
+	chip->otg_charge_icl_ua = ua;
+	smbchg_update_charge_through_otg(chip);
+
+	return count;
+}
+static DEVICE_ATTR_RW(otg_charge_icl_ua);
+
+static struct attribute *smbchg_cto_attrs[] = {
+	&dev_attr_allow_charge_while_otg.attr,
+	&dev_attr_otg_charge_icl_ua.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(smbchg_cto);
+
 /**
  * @brief smbchg_otg_enable() - Enable OTG regulator
  *
@@ -710,9 +822,18 @@ static int smbchg_otg_enable(struct regulator_dev *rdev)
 
 	dev_dbg(chip->dev, "Enabling OTG VBUS regulator");
 
+	/* If external VBUS is present while in host mode, do NOT source VBUS */
+	if (smbchg_is_charge_through_otg(chip)) {
+		dev_info(chip->dev,
+			 "OTG+charge: external VBUS present; not sourcing\n");
+		/* Apply sink path + ICL policy so host mode still works safely */
+		smbchg_update_charge_through_otg(chip);
+		return 0; /* pretend success, keeps host stack happy */
+	}
+
 	ret = regmap_update_bits(chip->regmap,
-				 chip->base + SMBCHG_BAT_IF_CMD_CHG, OTG_EN_BIT,
-				 OTG_EN_BIT);
+			         chip->base + SMBCHG_BAT_IF_CMD_CHG, OTG_EN_BIT,
+			         OTG_EN_BIT);
 	if (ret)
 		dev_err(chip->dev, "Failed to enable OTG regulator: %pe\n",
 			ERR_PTR(ret));
@@ -976,6 +1097,7 @@ static irqreturn_t smbchg_handle_usb_source_detect(int irq, void *data)
 	}
 
 	smbchg_extcon_update(chip);
+	smbchg_update_charge_through_otg(chip);
 	power_supply_changed(chip->usb_psy);
 
 	return IRQ_HANDLED;
@@ -998,6 +1120,7 @@ static irqreturn_t smbchg_handle_usbid_change(int irq, void *data)
 	dev_dbg(chip->dev, "OTG %spresent\n", otg_present ? "" : "not ");
 
 	smbchg_extcon_update(chip);
+	smbchg_update_charge_through_otg(chip);
 
 	return IRQ_HANDLED;
 }
@@ -1549,6 +1672,19 @@ static int smbchg_probe(struct platform_device *pdev)
 		return PTR_ERR(chip->otg_reg);
 	}
 
+	/* Charge-through OTG: defaults + DT */
+	chip->allow_charge_while_otg =
+		of_property_read_bool(pdev->dev.of_node,
+				      "qcom,allow-charge-while-otg");
+	if (of_property_read_u32(pdev->dev.of_node, "qcom,otg-charge-icl-ua",
+			                 &chip->otg_charge_icl_ua))
+		chip->otg_charge_icl_ua = SMBCHG_DEFAULT_OTG_CHARGE_ICL;
+
+	/* Create sysfs group for charge-through controls */
+	if (sysfs_create_groups(&pdev->dev.kobj, smbchg_cto_groups))
+		dev_warn(chip->dev,
+			 "failed to create charge-through sysfs group\n");
+
 	chip->data = of_device_get_match_data(chip->dev);
 
 	supply_config.drv_data = chip;
@@ -1633,6 +1769,9 @@ static int smbchg_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, chip);
 
+	/* Enforce policy if we boot with host+VBUS already present */
+	smbchg_update_charge_through_otg(chip);
+
 	return 0;
 }
 
@@ -1640,6 +1779,7 @@ static void smbchg_remove(struct platform_device *pdev)
 {
 	struct smbchg_chip *chip = platform_get_drvdata(pdev);
 
+	sysfs_remove_groups(&pdev->dev.kobj, smbchg_cto_groups);
 	smbchg_usb_enable(chip, false);
 	smbchg_charging_enable(chip, false);
 }
