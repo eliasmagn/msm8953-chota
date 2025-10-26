@@ -20,7 +20,16 @@ Two new sysfs attributes are exposed under the SMB charger platform device:
 - `otg_charge_icl_ua` – configure the input current limit used while sinking in
   this mode (defaults to 500 mA when unset).
 
-Both attributes take effect immediately when updated.
+Both attributes take effect immediately when updated, even while an OTG session
+is underway, so the sink current can be tuned in real time.
+
+When the policy is active, the driver records the previous USB sink state and
+input current limit before switching into charge-through mode. Role or VBUS
+changes delivered through the extcon notifier update the policy automatically,
+and once the external VBUS source disappears or OTG host mode ends, those
+settings are restored so the charger returns to its prior behavior without
+manual intervention. A dedicated mutex guards these transitions so concurrent
+sysfs writes and notifier callbacks cannot desynchronize the hardware state.
 
 ### Device tree properties
 
@@ -32,7 +41,9 @@ qcom,otg-charge-icl-ua = <500000>; /* microamps */
 ```
 
 If the properties are absent, the runtime sysfs controls remain available for
-manual testing.
+manual testing. The binding updates are documented in
+`Documentation/devicetree/bindings/power/supply/qcom,smbchg.yaml` for downstream
+integrators and upstream review.
 
 ## Contributing
 
