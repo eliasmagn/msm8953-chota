@@ -2,9 +2,12 @@
 
 ## Near Term
 - Validate the charge-through OTG policy on supported devices and tune the
-  default current limit as needed.
-- Upstream documentation for the new `qcom,allow-charge-while-otg` and
-  `qcom,otg-charge-icl-ua` device-tree properties.
+  default current limit as needed, exercising the live sysfs adjustment path.
+- Stress-test the extcon notifier path so role/VBUS changes always trigger the
+  mutex-guarded policy update without regressions in OTG sourcing.
+- Prepare upstream submission for the documented
+  `qcom,allow-charge-while-otg` and `qcom,otg-charge-icl-ua` bindings alongside
+  the driver changes.
 
 ## Mid Term
 - Integrate board-specific defaults for the charge-through policy based on

@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 
+#include <linux/mutex.h>
+#include <linux/notifier.h>
+
 /* Registers */
 /* CHGR */
 #define SMBCHG_CHGR_FV_STS			0x00c
@@ -46,6 +49,7 @@
 #define SMBCHG_USB_CHGPTH_USBID_MSB		0x30e
 #define SMBCHG_USB_CHGPTH_RT_STS		0x310
 #define SMBCHG_USB_CHGPTH_CMD_IL		0x340
+#define SMBCHG_USBIN_CMD_IL		SMBCHG_USB_CHGPTH_CMD_IL
 #define SMBCHG_USB_CHGPTH_CMD_APSD		0x341
 #define SMBCHG_USB_CHGPTH_CMD_HVDCP_1		0x342
 #define SMBCHG_USB_CHGPTH_CMD_HVDCP_2		0x343
@@ -246,6 +250,7 @@ struct smbchg_chip {
 	int otg_resets;
 
 	struct extcon_dev *edev;
+	struct notifier_block extcon_nb;
 
 	spinlock_t sec_access_lock;
 	struct work_struct otg_reset_work;
@@ -253,8 +258,12 @@ struct smbchg_chip {
 	const struct smbchg_data *data;
 
 	/* Charge-through while OTG host (runtime + DT configurable) */
+	struct mutex otg_charge_lock;
 	bool allow_charge_while_otg;
 	u32 otg_charge_icl_ua;   /* microamps; default 500000 */
+	u32 otg_charge_state;    /* SMBCHG_CTO_STATE_* bitmask */
+	bool otg_charge_prev_usb_enabled;
+	int otg_charge_prev_icl_ua;
 
 	bool smbchg_lite;
 };
