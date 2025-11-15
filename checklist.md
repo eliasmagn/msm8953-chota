@@ -27,5 +27,7 @@
 - [x] Trigger power-supply notifications after releasing the policy mutex and
       rely on the debounced worker for USB-source IRQ updates to avoid
       duplicate events and lock inversion risks.
+- [x] Propagate hardware failures from OTG policy transitions back through the
+      regulator enable/disable hooks so consumers receive accurate errors.
 - [ ] Validate the new policy on real hardware under various host peripherals.
 - [x] Document the device-tree bindings for the new DT properties upstream.

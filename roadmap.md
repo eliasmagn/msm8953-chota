@@ -20,6 +20,9 @@
   `power_supply_changed()` notifications immediately surface sink and
   charge-through transitions while only firing once per policy decision after
   the mutex is released.
+- Fault-inject or instrument regulator transactions to ensure OTG enable and
+  disable callbacks now propagate hardware write failures back to consumers
+  instead of silently succeeding.
 - Check early boot logs to ensure the initial `OTG policy` line reports `none -> ...`
   only after real notifications arrive, confirming the explicit policy reset.
 - Prepare upstream submission for the documented

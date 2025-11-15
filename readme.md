@@ -55,6 +55,9 @@ the external VBUS source disappears or OTG host mode ends, those settings are
 restored so the charger returns to its prior behavior without manual
 intervention. A dedicated mutex guards these transitions so concurrent sysfs
 writes and notifier callbacks cannot desynchronize the hardware sequencing.
+If any of the underlying register writes fail during these transitions, the
+regulator enable/disable callbacks now return the hardware error so OTG
+consumers immediately know that sourcing or sinking could not be applied.
 
 ### Device tree properties
 
