@@ -1167,8 +1167,11 @@ static int smbchg_otg_is_enabled(struct regulator_dev *rdev)
 
 	ret = regmap_read(chip->regmap, chip->base + SMBCHG_BAT_IF_CMD_CHG,
 			  &value);
-	if (ret)
-		dev_err(chip->dev, "Failed to read OTG regulator status\n");
+	if (ret) {
+		dev_err(chip->dev, "Failed to read OTG regulator status: %pe\n",
+			ERR_PTR(ret));
+		return ret;
+	}
 
 	return !!(value & OTG_EN_BIT);
 }

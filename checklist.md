@@ -29,5 +29,7 @@
       duplicate events and lock inversion risks.
 - [x] Propagate hardware failures from OTG policy transitions back through the
       regulator enable/disable hooks so consumers receive accurate errors.
+- [x] Return regmap read failures from the OTG regulator status callback so
+      consumers can distinguish "off" from unreadable hardware states.
 - [ ] Validate the new policy on real hardware under various host peripherals.
 - [x] Document the device-tree bindings for the new DT properties upstream.

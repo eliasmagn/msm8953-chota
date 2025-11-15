@@ -57,7 +57,10 @@ intervention. A dedicated mutex guards these transitions so concurrent sysfs
 writes and notifier callbacks cannot desynchronize the hardware sequencing.
 If any of the underlying register writes fail during these transitions, the
 regulator enable/disable callbacks now return the hardware error so OTG
-consumers immediately know that sourcing or sinking could not be applied.
+consumers immediately know that sourcing or sinking could not be applied. The
+OTG regulator status callback mirrors that behaviour by propagating regmap read
+failures to its callers, which helps higher-level consumers and diagnostics
+distinguish between a deliberately disabled rail and a bus access problem.
 
 ### Device tree properties
 

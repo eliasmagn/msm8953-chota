@@ -23,6 +23,9 @@
 - Fault-inject or instrument regulator transactions to ensure OTG enable and
   disable callbacks now propagate hardware write failures back to consumers
   instead of silently succeeding.
+- Exercise the OTG regulator status callback under forced regmap read failures
+  so callers observe the bubbled-up errno rather than misreporting the rail as
+  disabled.
 - Check early boot logs to ensure the initial `OTG policy` line reports `none -> ...`
   only after real notifications arrive, confirming the explicit policy reset.
 - Prepare upstream submission for the documented
