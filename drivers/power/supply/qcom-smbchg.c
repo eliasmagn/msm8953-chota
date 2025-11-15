@@ -34,6 +34,7 @@
 
 #define SMBCHG_PROP_ALLOW_CHARGE_WHILE_OTG   "qcom,allow-charge-while-otg"
 #define SMBCHG_PROP_OTG_CHARGE_ICL_UA        "qcom,otg-charge-icl-ua"
+#define SMBCHG_POLICY_DEBOUNCE_MS            150
 
 #ifndef SMBCHG_DEFAULT_OTG_CHARGE_ICL
 #define SMBCHG_DEFAULT_OTG_CHARGE_ICL 500000 /* 500 mA default */
@@ -858,6 +859,13 @@ static void smbchg_apply_mode(struct smbchg_chip *chip, enum smbchg_mode mode)
 	chip->cur_mode = mode;
 	dev_info(chip->dev, "OTG policy: %s -> %s\n",
 			smbchg_mode_name(previous), smbchg_mode_name(mode));
+
+	if (chip->usb_psy &&
+	    (previous == SMBCHG_MODE_SINK ||
+	     previous == SMBCHG_MODE_CHARGE_THROUGH ||
+	     mode == SMBCHG_MODE_SINK ||
+	     mode == SMBCHG_MODE_CHARGE_THROUGH))
+		power_supply_changed(chip->usb_psy);
 }
 
 static bool smbchg_extcon_state(struct smbchg_chip *chip, unsigned int id)
@@ -925,7 +933,7 @@ static int smbchg_extcon_event(struct notifier_block *nb, unsigned long event,
 	case EXTCON_CHG_USB_DCP:
 	case EXTCON_CHG_USB_CDP:
 		mod_delayed_work(system_wq, &chip->extcon_work,
-			       msecs_to_jiffies(150));
+			       msecs_to_jiffies(SMBCHG_POLICY_DEBOUNCE_MS));
 		break;
 	default:
 		break;
@@ -1051,10 +1059,10 @@ static int smbchg_otg_disable(struct regulator_dev *rdev)
         bool host, usb;
 
         dev_dbg(chip->dev, "Disabling OTG VBUS regulator");
-        host = smbchg_extcon_state(chip, EXTCON_USB_HOST);
-        usb = smbchg_extcon_usb_present(chip);
 
         mutex_lock(&chip->policy_lock);
+        host = smbchg_extcon_state(chip, EXTCON_USB_HOST);
+        usb = smbchg_extcon_usb_present(chip);
         if (host && usb && chip->allow_charge_while_otg)
                 smbchg_apply_mode(chip, SMBCHG_MODE_CHARGE_THROUGH);
         else if (usb)
@@ -1297,7 +1305,8 @@ static irqreturn_t smbchg_handle_usb_source_detect(int irq, void *data)
 	}
 
         smbchg_extcon_update(chip);
-        mod_delayed_work(system_wq, &chip->extcon_work, msecs_to_jiffies(150));
+        mod_delayed_work(system_wq, &chip->extcon_work,
+                           msecs_to_jiffies(SMBCHG_POLICY_DEBOUNCE_MS));
         power_supply_changed(chip->usb_psy);
 
         return IRQ_HANDLED;
@@ -1320,7 +1329,8 @@ static irqreturn_t smbchg_handle_usbid_change(int irq, void *data)
 	dev_dbg(chip->dev, "OTG %spresent\n", otg_present ? "" : "not ");
 
         smbchg_extcon_update(chip);
-        mod_delayed_work(system_wq, &chip->extcon_work, msecs_to_jiffies(150));
+        mod_delayed_work(system_wq, &chip->extcon_work,
+                           msecs_to_jiffies(SMBCHG_POLICY_DEBOUNCE_MS));
 
         return IRQ_HANDLED;
 }

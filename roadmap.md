@@ -7,12 +7,18 @@
 - Stress-test the delayed extcon worker so combined host/VBUS updates always
   land in the expected mode (source, sink, or charge-through) without regressions
   in OTG sourcing behaviour.
+- Review the shared debounce constant under different hubs and cables to ensure
+  the 150 ms window is sufficient and adjust the DT override if field testing
+  reveals slower extcon pairings.
 - Exercise the USB source detect and ID change IRQ paths to verify they follow
   the same debounced worker timing and never regress into per-event toggling.
 - Capture the new `OTG policy: <old> -> <new>` logs during bring-up to confirm
   regulator disable requests now fall back to the correct sink/idle state in mixed
   host/charger scenarios and never re-enable sourcing when only a host cable
   remains.
+- Observe user space power management tooling to confirm the new
+  `power_supply_changed()` notifications immediately surface sink and
+  charge-through transitions.
 - Check early boot logs to ensure the initial `OTG policy` line reports `none -> ...`
   only after real notifications arrive, confirming the explicit policy reset.
 - Prepare upstream submission for the documented

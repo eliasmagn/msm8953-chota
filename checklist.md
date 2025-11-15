@@ -20,5 +20,9 @@
       known "no cable" state.
 - [x] Route USB source and ID IRQ notifications through the debounced worker to
       avoid mixed timing paths.
+- [x] Drive all delayed policy evaluations through a shared debounce constant so
+      future tweaks stay consistent across notification sources.
+- [x] Notify the USB power-supply instance on sink and charge-through transitions
+      to keep user space aligned with policy changes.
 - [ ] Validate the new policy on real hardware under various host peripherals.
 - [x] Document the device-tree bindings for the new DT properties upstream.

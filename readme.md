@@ -26,7 +26,10 @@ turned off.
 Each transition also emits an `OTG policy: <old> -> <new>` dmesg log to make
 validation runs easier to audit, and the USB source detect / ID change IRQ
 paths now feed into the same debounced worker as the extcon notifier so every
-state change follows a single timing model.
+state change follows a single timing model driven by a shared debounce
+constant. When the mode toggles between sink, host, and charge-through, the
+driver also triggers `power_supply_changed()` on the USB power-supply instance
+so user space immediately sees the updated charging posture.
 
 ### Runtime controls
 
