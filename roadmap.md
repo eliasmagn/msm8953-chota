@@ -18,7 +18,8 @@
   remains.
 - Observe user space power management tooling to confirm the new
   `power_supply_changed()` notifications immediately surface sink and
-  charge-through transitions.
+  charge-through transitions while only firing once per policy decision after
+  the mutex is released.
 - Check early boot logs to ensure the initial `OTG policy` line reports `none -> ...`
   only after real notifications arrive, confirming the explicit policy reset.
 - Prepare upstream submission for the documented

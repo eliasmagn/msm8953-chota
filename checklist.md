@@ -24,5 +24,8 @@
       future tweaks stay consistent across notification sources.
 - [x] Notify the USB power-supply instance on sink and charge-through transitions
       to keep user space aligned with policy changes.
+- [x] Trigger power-supply notifications after releasing the policy mutex and
+      rely on the debounced worker for USB-source IRQ updates to avoid
+      duplicate events and lock inversion risks.
 - [ ] Validate the new policy on real hardware under various host peripherals.
 - [x] Document the device-tree bindings for the new DT properties upstream.

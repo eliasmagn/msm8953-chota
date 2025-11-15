@@ -29,7 +29,10 @@ paths now feed into the same debounced worker as the extcon notifier so every
 state change follows a single timing model driven by a shared debounce
 constant. When the mode toggles between sink, host, and charge-through, the
 driver also triggers `power_supply_changed()` on the USB power-supply instance
-so user space immediately sees the updated charging posture.
+so user space immediately sees the updated charging posture. Those
+notifications are deferred until after the policy mutex is released, and the
+USB source detect IRQ relies exclusively on the debounced worker to avoid
+duplicate user-space updates while keeping the timing model consistent.
 
 ### Runtime controls
 
