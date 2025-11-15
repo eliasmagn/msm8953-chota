@@ -1,10 +1,19 @@
 # Roadmap
 
 ## Near Term
-- Validate the charge-through OTG policy on supported devices and tune the
-  default current limit as needed, exercising the live sysfs adjustment path.
-- Stress-test the extcon notifier path so role/VBUS changes always trigger the
-  mutex-guarded policy update without regressions in OTG sourcing.
+- Validate the debounced charge-through state machine on supported devices,
+  covering every plug order (charger first, hub first, hot replug) while tuning
+  the default current limit via the live sysfs path.
+- Stress-test the delayed extcon worker so combined host/VBUS updates always
+  land in the expected mode (source, sink, or charge-through) without regressions
+  in OTG sourcing behaviour.
+- Exercise the USB source detect and ID change IRQ paths to verify they follow
+  the same debounced worker timing and never regress into per-event toggling.
+- Capture the new `OTG policy: <old> -> <new>` logs during bring-up to confirm
+  regulator disable requests now fall back to the correct sink/idle state in mixed
+  host/charger scenarios.
+- Check early boot logs to ensure the initial `OTG policy` line reports `none -> ...`
+  only after real notifications arrive, confirming the explicit policy reset.
 - Prepare upstream submission for the documented
   `qcom,allow-charge-while-otg` and `qcom,otg-charge-icl-ua` bindings alongside
   the driver changes.

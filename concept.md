@@ -4,14 +4,16 @@ This repository tracks mainline enablement work for Qualcomm MSM8953-based
 platforms. The goal is to upstream or stage kernel changes that improve power
 management, peripheral support, and day-to-day usability on these devices.
 
-The latest change introduces a safe "charge-through" mode for the SMB charger
-when the device acts as a USB OTG host. Instead of forcing the PMIC to source
-VBUS when an external supply is already present, the driver now allows the PMIC
-to sink current and recharge conservatively. The driver also tracks and restores
-the previous USB path and current limit settings so that normal charging resumes
-cleanly once the external supply or OTG session ends. Input current limits can
-be tuned dynamically while the policy is active so hardware validation can dial
-in the exact draw that keeps peripherals stable. An extcon notifier now feeds
-role and VBUS changes back into the policy automatically, and a dedicated mutex
-guards the update path so sysfs writes and notifiers cannot race. Device-tree
-bindings document the new opt-in properties for downstream integrators.
+The latest change replaces the ad-hoc OTG charge-through hooks with a unified
+state machine inside the SMB charger driver. Whenever extcon reports a host or
+VBUS transition, a short debounce window coalesces the events and the driver
+computes the combined state (host-only, sink-only, charge-through, or idle) in a
+single critical section. The selected policy disables the opposing power path
+before enabling the required one and, in charge-through mode, restores the
+previous USB sink state and current limit once the session ends. Input current
+limits remain tunable at runtime, allowing validation teams to balance draw
+against hub stability while observing the new behaviour. Device-tree bindings
+still describe the opt-in properties so downstream integrators can ship sensible
+defaults without losing the runtime controls.
+
+The latest refinements keep the policy decision central: even manual OTG regulator disable calls now rerun the combined evaluation so an attached charger stays active, and every transition is logged to dmesg so bring-up teams can verify the charge-through mode chosen in the field. The chip state now starts from an explicit "no cable" baseline at probe time, and both the extcon notifier and hardware IRQ paths funnel through the same debounced worker, preventing ordering races while keeping the logs authoritative.

@@ -7,10 +7,23 @@ adding quality-of-life features needed for day-to-day use.
 ## Charge-through OTG Safe Mode
 
 The Qualcomm SMB charger driver (`drivers/power/supply/qcom-smbchg.c`) now
-supports a "charge-through" policy when the device is acting as a USB OTG host
-while external VBUS is present. Instead of sourcing power onto the bus, the
-charger switches to a conservative sink mode so the battery can recharge from
-the external supply without disrupting connected peripherals.
+drives a debounced state machine that evaluates the combined extcon host/VBUS
+signals whenever anything changes. Rather than reacting independently to each
+cable notification, the driver waits briefly for the pair of events, computes a
+single mode (host-only, sink-only, charge-through, or idle), and then applies it
+by disabling the opposing power path before enabling the requested one. When the
+device is acting as an OTG host while external VBUS is present and the
+charge-through policy is allowed, the state machine selects the sink path and
+sets a conservative current limit so the battery can recharge without disrupting
+the connected hub.
+
+Manual OTG regulator disable requests now rerun the same policy evaluation
+instead of forcing the charger idle, so an attached power supply keeps feeding
+the phone whenever VBUS remains present.
+Each transition also emits an `OTG policy: <old> -> <new>` dmesg log to make
+validation runs easier to audit, and the USB source detect / ID change IRQ
+paths now feed into the same debounced worker as the extcon notifier so every
+state change follows a single timing model.
 
 ### Runtime controls
 
@@ -23,13 +36,16 @@ Two new sysfs attributes are exposed under the SMB charger platform device:
 Both attributes take effect immediately when updated, even while an OTG session
 is underway, so the sink current can be tuned in real time.
 
-When the policy is active, the driver records the previous USB sink state and
-input current limit before switching into charge-through mode. Role or VBUS
-changes delivered through the extcon notifier update the policy automatically,
-and once the external VBUS source disappears or OTG host mode ends, those
-settings are restored so the charger returns to its prior behavior without
-manual intervention. A dedicated mutex guards these transitions so concurrent
-sysfs writes and notifier callbacks cannot desynchronize the hardware state.
+The driver explicitly initialises its policy bookkeeping to "no cable" during
+probe so early boot messages reflect the real configuration before any
+notifications fire. When the policy is active, the driver records the previous
+USB sink state and input current limit before switching into charge-through
+mode. The debounced
+extcon worker keeps the state machine in sync with role/VBUS changes, and once
+the external VBUS source disappears or OTG host mode ends, those settings are
+restored so the charger returns to its prior behavior without manual
+intervention. A dedicated mutex guards these transitions so concurrent sysfs
+writes and notifier callbacks cannot desynchronize the hardware sequencing.
 
 ### Device tree properties
 

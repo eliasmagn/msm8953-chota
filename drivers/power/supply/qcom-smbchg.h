@@ -2,6 +2,7 @@
 
 #include <linux/mutex.h>
 #include <linux/notifier.h>
+#include <linux/workqueue.h>
 
 /* Registers */
 /* CHGR */
@@ -237,6 +238,13 @@ static const int smbchg_lc_ilim_options[] = {
 #define LC_ILIM_FULL_CURRENT_BIT	BIT(1)
 #define smbchg_lc_ilim(usb_3, full_current) smbchg_lc_ilim_options[usb_3 | full_current << 1]
 
+enum smbchg_mode {
+SMBCHG_MODE_NONE,
+SMBCHG_MODE_SINK,
+SMBCHG_MODE_SOURCE,
+SMBCHG_MODE_CHARGE_THROUGH,
+};
+
 struct smbchg_chip {
 	unsigned int base;
 	struct device *dev;
@@ -251,6 +259,7 @@ struct smbchg_chip {
 
 	struct extcon_dev *edev;
 	struct notifier_block extcon_nb;
+	struct delayed_work extcon_work;
 
 	spinlock_t sec_access_lock;
 	struct work_struct otg_reset_work;
@@ -258,12 +267,14 @@ struct smbchg_chip {
 	const struct smbchg_data *data;
 
 	/* Charge-through while OTG host (runtime + DT configurable) */
-	struct mutex otg_charge_lock;
+	struct mutex policy_lock;
+	enum smbchg_mode cur_mode;
 	bool allow_charge_while_otg;
-	u32 otg_charge_icl_ua;   /* microamps; default 500000 */
-	u32 otg_charge_state;    /* SMBCHG_CTO_STATE_* bitmask */
-	bool otg_charge_prev_usb_enabled;
-	int otg_charge_prev_icl_ua;
+	u32 otg_charge_icl_ua;	/* microamps; default 500000 */
+	bool cto_prev_usb_valid;
+	bool cto_prev_usb_enabled;
+	bool cto_prev_icl_valid;
+	int cto_prev_icl_ua;
 
 	bool smbchg_lite;
 };
