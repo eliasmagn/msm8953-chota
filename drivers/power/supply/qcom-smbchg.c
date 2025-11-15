@@ -875,16 +875,21 @@ static bool smbchg_extcon_state(struct smbchg_chip *chip, unsigned int id)
 	return ret;
 }
 
+static bool smbchg_extcon_usb_present(struct smbchg_chip *chip)
+{
+	return smbchg_extcon_state(chip, EXTCON_USB) ||
+		smbchg_extcon_state(chip, EXTCON_CHG_USB_SDP) ||
+		smbchg_extcon_state(chip, EXTCON_CHG_USB_CDP) ||
+		smbchg_extcon_state(chip, EXTCON_CHG_USB_DCP);
+}
+
 static void smbchg_update_policy(struct smbchg_chip *chip)
 {
 	bool host, usb;
 	enum smbchg_mode desired = SMBCHG_MODE_NONE;
 
 	host = smbchg_extcon_state(chip, EXTCON_USB_HOST);
-	usb = smbchg_extcon_state(chip, EXTCON_USB) ||
-		smbchg_extcon_state(chip, EXTCON_CHG_USB_SDP) ||
-		smbchg_extcon_state(chip, EXTCON_CHG_USB_CDP) ||
-		smbchg_extcon_state(chip, EXTCON_CHG_USB_DCP);
+	usb = smbchg_extcon_usb_present(chip);
 
 	mutex_lock(&chip->policy_lock);
 	if (host && usb && chip->allow_charge_while_otg)
@@ -1043,9 +1048,20 @@ static int smbchg_otg_enable(struct regulator_dev *rdev)
 static int smbchg_otg_disable(struct regulator_dev *rdev)
 {
         struct smbchg_chip *chip = rdev_get_drvdata(rdev);
+        bool host, usb;
 
         dev_dbg(chip->dev, "Disabling OTG VBUS regulator");
-        smbchg_update_policy(chip);
+        host = smbchg_extcon_state(chip, EXTCON_USB_HOST);
+        usb = smbchg_extcon_usb_present(chip);
+
+        mutex_lock(&chip->policy_lock);
+        if (host && usb && chip->allow_charge_while_otg)
+                smbchg_apply_mode(chip, SMBCHG_MODE_CHARGE_THROUGH);
+        else if (usb)
+                smbchg_apply_mode(chip, SMBCHG_MODE_SINK);
+        else
+                smbchg_apply_mode(chip, SMBCHG_MODE_NONE);
+        mutex_unlock(&chip->policy_lock);
 
         return 0;
 }

@@ -11,7 +11,8 @@
   the same debounced worker timing and never regress into per-event toggling.
 - Capture the new `OTG policy: <old> -> <new>` logs during bring-up to confirm
   regulator disable requests now fall back to the correct sink/idle state in mixed
-  host/charger scenarios.
+  host/charger scenarios and never re-enable sourcing when only a host cable
+  remains.
 - Check early boot logs to ensure the initial `OTG policy` line reports `none -> ...`
   only after real notifications arrive, confirming the explicit policy reset.
 - Prepare upstream submission for the documented

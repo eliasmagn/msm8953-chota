@@ -13,6 +13,8 @@
       prevent brownouts when switching between sink and source states.
 - [x] Re-evaluate the combined policy when the OTG regulator is disabled so
       charge-through sessions remain in sink mode while VBUS is present.
+- [x] Clamp regulator disable handling to sink/idle outcomes so consumers cannot
+      inadvertently re-enable OTG sourcing when requesting a shutdown.
 - [x] Emit human-readable OTG policy transition logs to simplify hardware bring-up.
 - [x] Initialise the policy bookkeeping at probe so charge-through starts from a
       known "no cable" state.

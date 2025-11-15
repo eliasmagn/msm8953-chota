@@ -19,7 +19,10 @@ the connected hub.
 
 Manual OTG regulator disable requests now rerun the same policy evaluation
 instead of forcing the charger idle, so an attached power supply keeps feeding
-the phone whenever VBUS remains present.
+the phone whenever VBUS remains present. The disable handler constrains that
+re-evaluation to sink-or-idle results, ensuring a host-only scenario cannot
+silently re-enable VBUS sourcing after a consumer requests the regulator be
+turned off.
 Each transition also emits an `OTG policy: <old> -> <new>` dmesg log to make
 validation runs easier to audit, and the USB source detect / ID change IRQ
 paths now feed into the same debounced worker as the extcon notifier so every
