@@ -34,8 +34,9 @@
 - [x] Attempt a best-effort rollback to the previous OTG policy when hardware
       writes fail mid-transition so neither power path is left in an undefined
       state.
-- [x] Expose a `qcom,otg-policy-debounce-ms` binding and runtime knob so boards
-      can tune the shared debounce window without editing the driver.
+- [x] Expose a `qcom,otg-policy-debounce-ms` binding and `otg_policy_debounce_ms`
+      sysfs knob so boards can tune the shared debounce window without editing
+      the driver.
 - [x] Devm-manage `power_supply_get_battery_info()` allocations so probe
       failures and remove paths automatically release the cached data.
 - [ ] Validate the new policy on real hardware under various host peripherals.

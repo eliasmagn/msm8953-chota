@@ -36,14 +36,16 @@ duplicate user-space updates while keeping the timing model consistent.
 
 ### Runtime controls
 
-Two new sysfs attributes are exposed under the SMB charger platform device:
+Three sysfs attributes are exposed under the SMB charger platform device:
 
 - `allow_charge_while_otg` – enable or disable the policy (default disabled).
 - `otg_charge_icl_ua` – configure the input current limit used while sinking in
   this mode (defaults to 500 mA when unset).
+- `otg_policy_debounce_ms` – adjust the shared debounce window (clamped between
+  50 ms and 500 ms, defaults to 150 ms) without rebuilding the kernel.
 
-Both attributes take effect immediately when updated, even while an OTG session
-is underway, so the sink current can be tuned in real time.
+Each attribute takes effect immediately when updated, even while an OTG session
+is underway, so the sink current and debounce window can be tuned in real time.
 
 The driver explicitly initialises its policy bookkeeping to "no cable" during
 probe so early boot messages reflect the real configuration before any
@@ -75,8 +77,9 @@ qcom,otg-policy-debounce-ms = <150>; /* optional 50-500 ms */
 ```
 
 If the properties are absent, the runtime sysfs controls remain available for
-manual testing. Boards can tune the optional debounce property anywhere from
-50 ms to 500 ms to match slower extcon pairings without rebuilding the kernel.
+manual testing. Boards can either set the device-tree property up front or use
+the `otg_policy_debounce_ms` sysfs knob to pick any value between 50 ms and
+500 ms for slower extcon pairings without rebuilding the kernel.
 The binding updates are documented in
 `Documentation/devicetree/bindings/power/supply/qcom,smbchg.yaml` for downstream
 integrators and upstream review.

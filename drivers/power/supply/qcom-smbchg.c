@@ -1114,9 +1114,46 @@ static ssize_t otg_charge_icl_ua_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(otg_charge_icl_ua);
 
+static ssize_t otg_policy_debounce_ms_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct smbchg_chip *chip = dev_get_drvdata(dev);
+	unsigned int debounce_ms;
+
+	mutex_lock(&chip->policy_lock);
+	debounce_ms = chip->policy_debounce_ms;
+	mutex_unlock(&chip->policy_lock);
+
+	return sysfs_emit(buf, "%u\n", debounce_ms);
+}
+
+static ssize_t otg_policy_debounce_ms_store(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct smbchg_chip *chip = dev_get_drvdata(dev);
+	unsigned int debounce_ms;
+
+	if (kstrtouint(buf, 0, &debounce_ms))
+		return -EINVAL;
+
+	debounce_ms = clamp_t(unsigned int, debounce_ms,
+				 SMBCHG_POLICY_DEBOUNCE_MIN_MS,
+				 SMBCHG_POLICY_DEBOUNCE_MAX_MS);
+
+	mutex_lock(&chip->policy_lock);
+	chip->policy_debounce_ms = debounce_ms;
+	mutex_unlock(&chip->policy_lock);
+
+	mod_delayed_work(system_wq, &chip->extcon_work, 0);
+
+	return count;
+}
+static DEVICE_ATTR_RW(otg_policy_debounce_ms);
+
 static struct attribute *smbchg_cto_attrs[] = {
 	&dev_attr_allow_charge_while_otg.attr,
 	&dev_attr_otg_charge_icl_ua.attr,
+	&dev_attr_otg_policy_debounce_ms.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(smbchg_cto);

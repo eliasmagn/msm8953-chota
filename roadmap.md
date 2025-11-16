@@ -9,8 +9,8 @@
   in OTG sourcing behaviour.
 - Review the shared debounce constant under different hubs and cables to ensure
   the default 150 ms window is sufficient, and tune the new
-  `qcom,otg-policy-debounce-ms` property (50–500 ms) where field testing reveals
-  slower extcon pairings.
+  `qcom,otg-policy-debounce-ms` property or `otg_policy_debounce_ms` sysfs knob
+  (50–500 ms) where field testing reveals slower extcon pairings.
 - Exercise the USB source detect and ID change IRQ paths to verify they follow
   the same debounced worker timing and never regress into per-event toggling.
 - Capture the new `OTG policy: <old> -> <new>` logs during bring-up to confirm

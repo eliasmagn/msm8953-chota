@@ -112,11 +112,14 @@ properties:
 
   qcom,otg-policy-debounce-ms:
     $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 50
+    maximum: 500
+    default: 150
     description:
       Optional delay, in milliseconds, used to debounce combined USB host and
       VBUS extcon notifications before applying the OTG policy. If absent, the
-      driver defaults to 150 ms. Values outside the 50–500 ms range are clamped
-      to that window.
+      driver defaults to 150 ms. Values outside the 50–500 ms range are
+      rejected by the binding.
   otg-vbus:
     type: object
 
