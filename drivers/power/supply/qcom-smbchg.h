@@ -239,10 +239,10 @@ static const int smbchg_lc_ilim_options[] = {
 #define smbchg_lc_ilim(usb_3, full_current) smbchg_lc_ilim_options[usb_3 | full_current << 1]
 
 enum smbchg_mode {
-SMBCHG_MODE_NONE,
-SMBCHG_MODE_SINK,
-SMBCHG_MODE_SOURCE,
-SMBCHG_MODE_CHARGE_THROUGH,
+	SMBCHG_MODE_NONE,
+	SMBCHG_MODE_SINK,
+	SMBCHG_MODE_SOURCE,
+	SMBCHG_MODE_CHARGE_THROUGH,
 };
 
 struct smbchg_chip {
@@ -269,6 +269,7 @@ struct smbchg_chip {
 	/* Charge-through while OTG host (runtime + DT configurable) */
 	struct mutex policy_lock;
 	enum smbchg_mode cur_mode;
+	unsigned int policy_debounce_ms;
 	bool allow_charge_while_otg;
 	u32 otg_charge_icl_ua;	/* microamps; default 500000 */
 	bool cto_prev_usb_valid;

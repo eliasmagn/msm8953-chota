@@ -31,5 +31,12 @@
       regulator enable/disable hooks so consumers receive accurate errors.
 - [x] Return regmap read failures from the OTG regulator status callback so
       consumers can distinguish "off" from unreadable hardware states.
+- [x] Attempt a best-effort rollback to the previous OTG policy when hardware
+      writes fail mid-transition so neither power path is left in an undefined
+      state.
+- [x] Expose a `qcom,otg-policy-debounce-ms` binding and runtime knob so boards
+      can tune the shared debounce window without editing the driver.
+- [x] Devm-manage `power_supply_get_battery_info()` allocations so probe
+      failures and remove paths automatically release the cached data.
 - [ ] Validate the new policy on real hardware under various host peripherals.
 - [x] Document the device-tree bindings for the new DT properties upstream.

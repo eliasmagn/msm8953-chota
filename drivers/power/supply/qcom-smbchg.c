@@ -32,9 +32,23 @@
 
 #include "qcom-smbchg.h"
 
+static void smbchg_put_batt_info(void *data)
+{
+        struct smbchg_chip *chip = data;
+
+        if (!chip->usb_psy || !chip->batt_info)
+                return;
+
+        power_supply_put_battery_info(chip->usb_psy, chip->batt_info);
+}
+
 #define SMBCHG_PROP_ALLOW_CHARGE_WHILE_OTG   "qcom,allow-charge-while-otg"
 #define SMBCHG_PROP_OTG_CHARGE_ICL_UA        "qcom,otg-charge-icl-ua"
-#define SMBCHG_POLICY_DEBOUNCE_MS            150
+#define SMBCHG_PROP_OTG_POLICY_DEBOUNCE_MS   "qcom,otg-policy-debounce-ms"
+
+#define SMBCHG_POLICY_DEBOUNCE_DEFAULT_MS    150
+#define SMBCHG_POLICY_DEBOUNCE_MIN_MS        50
+#define SMBCHG_POLICY_DEBOUNCE_MAX_MS        500
 
 #ifndef SMBCHG_DEFAULT_OTG_CHARGE_ICL
 #define SMBCHG_DEFAULT_OTG_CHARGE_ICL 500000 /* 500 mA default */
@@ -827,32 +841,23 @@ static const char *smbchg_mode_name(enum smbchg_mode mode)
 }
 
 
-static int smbchg_apply_mode(struct smbchg_chip *chip, enum smbchg_mode mode,
-                           bool *affects_sink)
+static int smbchg_transition_mode(struct smbchg_chip *chip,
+				       enum smbchg_mode from, enum smbchg_mode to)
 {
 	int ret;
 	int rc = 0;
-	enum smbchg_mode previous = chip->cur_mode;
-	bool sink_change = false;
 
-	if (previous == mode) {
-		if (mode == SMBCHG_MODE_CHARGE_THROUGH) {
-			ret = smbchg_apply_charge_through_current(chip);
-			if (ret < 0)
-				rc = ret;
-		}
-		if (affects_sink)
-			*affects_sink = false;
-		return rc;
-	}
+	if (from == to)
+		return 0;
 
-	if (previous == SMBCHG_MODE_CHARGE_THROUGH) {
+	if (from == SMBCHG_MODE_CHARGE_THROUGH &&
+	    to != SMBCHG_MODE_CHARGE_THROUGH) {
 		ret = smbchg_restore_usb_path(chip);
 		if (ret && !rc)
 			rc = ret;
 	}
 
-	switch (mode) {
+	switch (to) {
 	case SMBCHG_MODE_CHARGE_THROUGH:
 		smbchg_save_usb_path(chip);
 		ret = smbchg_set_otg_vbus(chip, false);
@@ -861,8 +866,8 @@ static int smbchg_apply_mode(struct smbchg_chip *chip, enum smbchg_mode mode,
 		ret = smbchg_usb_enable(chip, true);
 		if (ret) {
 			dev_warn(chip->dev,
-				"OTG policy: enable USB sink failed: %pe\n",
-				ERR_PTR(ret));
+				 "OTG policy: enable USB sink failed: %pe\n",
+				 ERR_PTR(ret));
 			if (!rc)
 				rc = ret;
 		}
@@ -897,27 +902,60 @@ static int smbchg_apply_mode(struct smbchg_chip *chip, enum smbchg_mode mode,
 		break;
 	}
 
-	if (!rc) {
-		chip->cur_mode = mode;
-		dev_info(chip->dev, "OTG policy: %s -> %s\n",
-                         smbchg_mode_name(previous), smbchg_mode_name(mode));
+        return rc;
+}
 
-		if (previous == SMBCHG_MODE_SINK ||
-                    previous == SMBCHG_MODE_CHARGE_THROUGH ||
-                    mode == SMBCHG_MODE_SINK ||
-                    mode == SMBCHG_MODE_CHARGE_THROUGH)
-			sink_change = previous != mode;
-	} else {
-		dev_err(chip->dev,
-			"OTG policy: %s -> %s failed: %pe\n",
-			smbchg_mode_name(previous),
-			smbchg_mode_name(mode), ERR_PTR(rc));
-	}
+static int smbchg_apply_mode(struct smbchg_chip *chip, enum smbchg_mode mode,
+                           bool *affects_sink)
+{
+        int ret;
+        int rc = 0;
+        enum smbchg_mode previous = chip->cur_mode;
+        bool sink_change = false;
 
-	if (affects_sink)
-		*affects_sink = sink_change;
+        if (previous == mode) {
+                if (mode == SMBCHG_MODE_CHARGE_THROUGH) {
+                        ret = smbchg_apply_charge_through_current(chip);
+                        if (ret < 0)
+                                rc = ret;
+                }
+                if (affects_sink)
+                        *affects_sink = false;
+                return rc;
+        }
 
-	return rc;
+        rc = smbchg_transition_mode(chip, previous, mode);
+        if (rc) {
+                dev_err(chip->dev,
+                        "OTG policy: %s -> %s failed: %pe\n",
+                        smbchg_mode_name(previous),
+                        smbchg_mode_name(mode), ERR_PTR(rc));
+                ret = smbchg_transition_mode(chip, mode, previous);
+                if (ret)
+                        dev_warn(chip->dev,
+                                 "OTG policy: rollback to %s failed: %pe\n",
+                                 smbchg_mode_name(previous), ERR_PTR(ret));
+
+                if (affects_sink)
+                        *affects_sink = false;
+                return rc;
+        }
+
+        chip->cur_mode = mode;
+        dev_info_ratelimited(chip->dev, "OTG policy: %s -> %s\n",
+                             smbchg_mode_name(previous),
+                             smbchg_mode_name(mode));
+
+        if (previous == SMBCHG_MODE_SINK ||
+            previous == SMBCHG_MODE_CHARGE_THROUGH ||
+            mode == SMBCHG_MODE_SINK ||
+            mode == SMBCHG_MODE_CHARGE_THROUGH)
+                sink_change = previous != mode;
+
+        if (affects_sink)
+                *affects_sink = sink_change;
+
+        return 0;
 }
 
 static bool smbchg_extcon_state(struct smbchg_chip *chip, unsigned int id)
@@ -996,8 +1034,8 @@ static int smbchg_extcon_event(struct notifier_block *nb, unsigned long event,
 	case EXTCON_CHG_USB_SDP:
 	case EXTCON_CHG_USB_DCP:
 	case EXTCON_CHG_USB_CDP:
-		mod_delayed_work(system_wq, &chip->extcon_work,
-			       msecs_to_jiffies(SMBCHG_POLICY_DEBOUNCE_MS));
+                mod_delayed_work(system_wq, &chip->extcon_work,
+                               msecs_to_jiffies(chip->policy_debounce_ms));
 		break;
 	default:
 		break;
@@ -1095,7 +1133,7 @@ static int smbchg_otg_enable(struct regulator_dev *rdev)
 	bool notify = false;
 	int rc;
 
-	dev_dbg(chip->dev, "Enabling OTG VBUS regulator");
+        dev_dbg(chip->dev, "Enabling OTG VBUS regulator\n");
 
 	rc = smbchg_update_policy(chip);
 	if (rc)
@@ -1132,7 +1170,7 @@ static int smbchg_otg_disable(struct regulator_dev *rdev)
 	bool notify = false;
 	int rc = 0;
 
-	dev_dbg(chip->dev, "Disabling OTG VBUS regulator");
+        dev_dbg(chip->dev, "Disabling OTG VBUS regulator\n");
 
 	mutex_lock(&chip->policy_lock);
 	host = smbchg_extcon_state(chip, EXTCON_USB_HOST);
@@ -1387,8 +1425,8 @@ static irqreturn_t smbchg_handle_usb_source_detect(int irq, void *data)
 	}
 
 	smbchg_extcon_update(chip);
-	mod_delayed_work(system_wq, &chip->extcon_work,
-                           msecs_to_jiffies(SMBCHG_POLICY_DEBOUNCE_MS));
+        mod_delayed_work(system_wq, &chip->extcon_work,
+                           msecs_to_jiffies(chip->policy_debounce_ms));
 
 	return IRQ_HANDLED;
 }
@@ -1410,8 +1448,8 @@ static irqreturn_t smbchg_handle_usbid_change(int irq, void *data)
 	dev_dbg(chip->dev, "OTG %spresent\n", otg_present ? "" : "not ");
 
 	smbchg_extcon_update(chip);
-	mod_delayed_work(system_wq, &chip->extcon_work,
-                           msecs_to_jiffies(SMBCHG_POLICY_DEBOUNCE_MS));
+        mod_delayed_work(system_wq, &chip->extcon_work,
+                           msecs_to_jiffies(chip->policy_debounce_ms));
 
 	return IRQ_HANDLED;
 }
@@ -1916,10 +1954,11 @@ static int smbchg_init(struct smbchg_chip *chip)
 
 static int smbchg_probe(struct platform_device *pdev)
 {
-	struct smbchg_chip *chip;
-	struct regulator_config config = {};
-	struct power_supply_config supply_config = {};
-	int i, irq, ret;
+        struct smbchg_chip *chip;
+        struct regulator_config config = {};
+        struct power_supply_config supply_config = {};
+        u32 debounce_ms;
+        int i, irq, ret;
 
 	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
 	if (!chip)
@@ -1945,9 +1984,10 @@ static int smbchg_probe(struct platform_device *pdev)
 	mutex_init(&chip->policy_lock);
 	INIT_DELAYED_WORK(&chip->extcon_work, smbchg_extcon_work);
 
-	chip->cur_mode = SMBCHG_MODE_NONE;
-	chip->cto_prev_usb_valid = false;
-	chip->cto_prev_icl_valid = false;
+        chip->cur_mode = SMBCHG_MODE_NONE;
+        chip->policy_debounce_ms = SMBCHG_POLICY_DEBOUNCE_DEFAULT_MS;
+        chip->cto_prev_usb_valid = false;
+        chip->cto_prev_icl_valid = false;
 
 	/* Initialize OTG regulator */
 	chip->otg_rdesc.id = -1;
@@ -1973,10 +2013,17 @@ static int smbchg_probe(struct platform_device *pdev)
 	chip->allow_charge_while_otg =
 		of_property_read_bool(pdev->dev.of_node,
                                       SMBCHG_PROP_ALLOW_CHARGE_WHILE_OTG);
-	if (of_property_read_u32(pdev->dev.of_node,
+        if (of_property_read_u32(pdev->dev.of_node,
                                  SMBCHG_PROP_OTG_CHARGE_ICL_UA,
                                  &chip->otg_charge_icl_ua))
-		chip->otg_charge_icl_ua = SMBCHG_DEFAULT_OTG_CHARGE_ICL;
+                chip->otg_charge_icl_ua = SMBCHG_DEFAULT_OTG_CHARGE_ICL;
+
+        if (!of_property_read_u32(pdev->dev.of_node,
+                                  SMBCHG_PROP_OTG_POLICY_DEBOUNCE_MS,
+                                  &debounce_ms))
+                chip->policy_debounce_ms = clamp_t(u32, debounce_ms,
+                                                   SMBCHG_POLICY_DEBOUNCE_MIN_MS,
+                                                   SMBCHG_POLICY_DEBOUNCE_MAX_MS);
 
 	/* Create sysfs group for charge-through controls */
 	if (sysfs_create_groups(&pdev->dev.kobj, smbchg_cto_groups))
@@ -1995,15 +2042,23 @@ static int smbchg_probe(struct platform_device *pdev)
 		return PTR_ERR(chip->usb_psy);
 	}
 
-	ret = power_supply_get_battery_info(chip->usb_psy, &chip->batt_info);
-	if (ret) {
-		dev_err(chip->dev, "Failed to get battery info: %pe\n",
-			ERR_PTR(ret));
-		return ret;
-	}
+        ret = power_supply_get_battery_info(chip->usb_psy, &chip->batt_info);
+        if (ret) {
+                dev_err(chip->dev, "Failed to get battery info: %pe\n",
+                        ERR_PTR(ret));
+                return ret;
+        }
 
-	if (chip->batt_info->voltage_max_design_uv == -EINVAL) {
-		dev_err(chip->dev,
+        ret = devm_add_action_or_reset(chip->dev, smbchg_put_batt_info, chip);
+        if (ret) {
+                dev_err(chip->dev,
+                        "Failed to register battery info cleanup: %pe\n",
+                        ERR_PTR(ret));
+                return ret;
+        }
+
+        if (chip->batt_info->voltage_max_design_uv == -EINVAL) {
+                dev_err(chip->dev,
 			"Battery info missing maximum design voltage\n");
 		return -EINVAL;
 	}

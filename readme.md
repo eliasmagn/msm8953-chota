@@ -22,8 +22,8 @@ instead of forcing the charger idle, so an attached power supply keeps feeding
 the phone whenever VBUS remains present. The disable handler constrains that
 re-evaluation to sink-or-idle results, ensuring a host-only scenario cannot
 silently re-enable VBUS sourcing after a consumer requests the regulator be
-turned off.
-Each transition also emits an `OTG policy: <old> -> <new>` dmesg log to make
+turned off. Transitions are logged via a ratelimited
+`OTG policy: <old> -> <new>` message to make
 validation runs easier to audit, and the USB source detect / ID change IRQ
 paths now feed into the same debounced worker as the extcon notifier so every
 state change follows a single timing model driven by a shared debounce
@@ -49,18 +49,20 @@ The driver explicitly initialises its policy bookkeeping to "no cable" during
 probe so early boot messages reflect the real configuration before any
 notifications fire. When the policy is active, the driver records the previous
 USB sink state and input current limit before switching into charge-through
-mode. The debounced
-extcon worker keeps the state machine in sync with role/VBUS changes, and once
-the external VBUS source disappears or OTG host mode ends, those settings are
-restored so the charger returns to its prior behavior without manual
-intervention. A dedicated mutex guards these transitions so concurrent sysfs
-writes and notifier callbacks cannot desynchronize the hardware sequencing.
-If any of the underlying register writes fail during these transitions, the
-regulator enable/disable callbacks now return the hardware error so OTG
-consumers immediately know that sourcing or sinking could not be applied. The
-OTG regulator status callback mirrors that behaviour by propagating regmap read
-failures to its callers, which helps higher-level consumers and diagnostics
-distinguish between a deliberately disabled rail and a bus access problem.
+mode. The debounced extcon worker keeps the state machine in sync with
+role/VBUS changes, and once the external VBUS source disappears or OTG host
+mode ends, those settings are restored so the charger returns to its prior
+behavior without manual intervention. If a policy transition fails part-way
+through, the driver now attempts a best-effort rollback to the previous mode so
+the hardware is not left half-switched, and a dedicated mutex guards these
+transitions so concurrent sysfs writes and notifier callbacks cannot
+desynchronize the sequencing. If any of the underlying register writes fail
+during these transitions, the regulator enable/disable callbacks now return the
+hardware error so OTG consumers immediately know that sourcing or sinking could
+not be applied. The OTG regulator status callback mirrors that behaviour by
+propagating regmap read failures to its callers, which helps higher-level
+consumers and diagnostics distinguish between a deliberately disabled rail and
+a bus access problem.
 
 ### Device tree properties
 
@@ -69,10 +71,13 @@ Boards can opt-in by setting the following properties on the SMB charger node:
 ```dts
 qcom,allow-charge-while-otg;
 qcom,otg-charge-icl-ua = <500000>; /* microamps */
+qcom,otg-policy-debounce-ms = <150>; /* optional 50-500 ms */
 ```
 
 If the properties are absent, the runtime sysfs controls remain available for
-manual testing. The binding updates are documented in
+manual testing. Boards can tune the optional debounce property anywhere from
+50 ms to 500 ms to match slower extcon pairings without rebuilding the kernel.
+The binding updates are documented in
 `Documentation/devicetree/bindings/power/supply/qcom,smbchg.yaml` for downstream
 integrators and upstream review.
 
