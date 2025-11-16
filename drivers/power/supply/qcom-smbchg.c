@@ -7,6 +7,7 @@
  */
 
 #include <linux/unaligned.h>
+#include <linux/compiler.h>
 #include <linux/errno.h>
 #include <linux/extcon-provider.h>
 #include <linux/extcon.h>
@@ -737,9 +738,9 @@ static int smbchg_set_otg_vbus(struct smbchg_chip *chip, bool enable)
 			 chip->base + SMBCHG_BAT_IF_CMD_CHG, OTG_EN_BIT,
 			 enable ? OTG_EN_BIT : 0);
 	if (ret)
-		dev_warn(chip->dev,
-			 "Failed to %sable OTG regulator: %pe\n",
-			 enable ? "en" : "dis", ERR_PTR(ret));
+		dev_warn_ratelimited(chip->dev,
+                                     "Failed to %sable OTG regulator: %pe\n",
+                                     enable ? "en" : "dis", ERR_PTR(ret));
 
 	return ret;
 }
@@ -817,9 +818,9 @@ static int smbchg_apply_charge_through_current(struct smbchg_chip *chip)
 		SMBCHG_DEFAULT_OTG_CHARGE_ICL;
 	ret = smbchg_usb_set_ilim(chip, target_ua);
 	if (ret < 0)
-		dev_warn(chip->dev,
-			"OTG policy: set ICL failed: %pe\n",
-			ERR_PTR(ret));
+		dev_warn_ratelimited(chip->dev,
+                                     "OTG policy: set ICL failed: %pe\n",
+                                     ERR_PTR(ret));
 
 	return ret;
 }
@@ -1032,11 +1033,12 @@ static int smbchg_extcon_event(struct notifier_block *nb, unsigned long event,
 	case EXTCON_USB:
 	case EXTCON_USB_HOST:
 	case EXTCON_CHG_USB_SDP:
-	case EXTCON_CHG_USB_DCP:
-	case EXTCON_CHG_USB_CDP:
+        case EXTCON_CHG_USB_DCP:
+        case EXTCON_CHG_USB_CDP:
                 mod_delayed_work(system_wq, &chip->extcon_work,
-                               msecs_to_jiffies(chip->policy_debounce_ms));
-		break;
+                                 msecs_to_jiffies(READ_ONCE(
+                                         chip->policy_debounce_ms)));
+                break;
 	default:
 		break;
 	}
@@ -1462,8 +1464,9 @@ static irqreturn_t smbchg_handle_usb_source_detect(int irq, void *data)
 	}
 
 	smbchg_extcon_update(chip);
-        mod_delayed_work(system_wq, &chip->extcon_work,
-                           msecs_to_jiffies(chip->policy_debounce_ms));
+	mod_delayed_work(system_wq, &chip->extcon_work,
+                         msecs_to_jiffies(READ_ONCE(
+                                 chip->policy_debounce_ms)));
 
 	return IRQ_HANDLED;
 }
@@ -1485,8 +1488,9 @@ static irqreturn_t smbchg_handle_usbid_change(int irq, void *data)
 	dev_dbg(chip->dev, "OTG %spresent\n", otg_present ? "" : "not ");
 
 	smbchg_extcon_update(chip);
-        mod_delayed_work(system_wq, &chip->extcon_work,
-                           msecs_to_jiffies(chip->policy_debounce_ms));
+	mod_delayed_work(system_wq, &chip->extcon_work,
+                         msecs_to_jiffies(READ_ONCE(
+                                 chip->policy_debounce_ms)));
 
 	return IRQ_HANDLED;
 }
@@ -2128,10 +2132,11 @@ static int smbchg_probe(struct platform_device *pdev)
 	extcon_set_property_capability(chip->edev, EXTCON_USB_HOST,
 			       EXTCON_PROP_USB_VBUS);
 
-	chip->extcon_nb.notifier_call = smbchg_extcon_event;
-	ret = extcon_register_notifier_all(chip->edev, &chip->extcon_nb);
-	if (ret)
-		dev_warn(chip->dev, "Failed to register extcon notifier: %pe\n",
+        chip->extcon_nb.notifier_call = smbchg_extcon_event;
+        ret = devm_extcon_register_notifier_all(chip->dev, chip->edev,
+                                                &chip->extcon_nb);
+        if (ret)
+                dev_warn(chip->dev, "Failed to register extcon notifier: %pe\n",
                          ERR_PTR(ret));
 
 	/* Initialize charger */
@@ -2174,13 +2179,12 @@ static int smbchg_probe(struct platform_device *pdev)
 
 static void smbchg_remove(struct platform_device *pdev)
 {
-	struct smbchg_chip *chip = platform_get_drvdata(pdev);
+        struct smbchg_chip *chip = platform_get_drvdata(pdev);
 
-	extcon_unregister_notifier_all(chip->edev, &chip->extcon_nb);
-	cancel_delayed_work_sync(&chip->extcon_work);
-	sysfs_remove_groups(&pdev->dev.kobj, smbchg_cto_groups);
-	smbchg_usb_enable(chip, false);
-	smbchg_charging_enable(chip, false);
+        cancel_delayed_work_sync(&chip->extcon_work);
+        sysfs_remove_groups(&pdev->dev.kobj, smbchg_cto_groups);
+        smbchg_usb_enable(chip, false);
+        smbchg_charging_enable(chip, false);
 }
 
 static const struct of_device_id smbchg_id_table[] = {

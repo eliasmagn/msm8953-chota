@@ -39,5 +39,11 @@
       the driver.
 - [x] Devm-manage `power_supply_get_battery_info()` allocations so probe
       failures and remove paths automatically release the cached data.
+- [x] Devm-manage the extcon notifier registration so probe failures unwind
+      without leaking callbacks.
+- [x] Snapshot the runtime debounce window with `READ_ONCE()` before scheduling
+      delayed policy work from notifier or IRQ contexts.
+- [x] Ratelimit repeated OTG regulator and charge-through warning messages to
+      keep dmesg readable when hubs or cables chatter.
 - [ ] Validate the new policy on real hardware under various host peripherals.
 - [x] Document the device-tree bindings for the new DT properties upstream.

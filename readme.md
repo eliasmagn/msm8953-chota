@@ -66,6 +66,14 @@ propagating regmap read failures to its callers, which helps higher-level
 consumers and diagnostics distinguish between a deliberately disabled rail and
 a bus access problem.
 
+Every delayed policy evaluation now snapshots the runtime-configurable debounce
+window with `READ_ONCE()` before scheduling work so IRQs and notifiers all apply
+the latest knob value without taking the mutex. The extcon notifier is
+devm-managed to guarantee probe errors unwind without leaking callbacks, and
+noisy regulator warnings (for OTG enable toggles and charge-through current
+updates) use the ratelimited logging helpers so bouncing hubs cannot flood
+dmesg during stress runs.
+
 ### Device tree properties
 
 Boards can opt-in by setting the following properties on the SMB charger node:

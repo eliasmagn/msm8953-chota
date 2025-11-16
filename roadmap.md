@@ -21,6 +21,12 @@
   `power_supply_changed()` notifications immediately surface sink and
   charge-through transitions while only firing once per policy decision after
   the mutex is released.
+- Force probe-error paths (e.g. temporarily fail regulator registration) to
+  confirm the devm-managed extcon notifier and battery info cleanup unwind
+  without leaks when the driver bails out early.
+- Adjust `otg_policy_debounce_ms` at runtime while capturing tracepoints to
+  verify every IRQ/notifier reschedule picks up the latest value via the
+  `READ_ONCE()` snapshots.
 - Fault-inject or instrument regulator transactions to ensure OTG enable and
   disable callbacks now propagate hardware write failures back to consumers
   instead of silently succeeding.
