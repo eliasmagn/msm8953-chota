@@ -7,10 +7,12 @@
  */
 
 #include <linux/unaligned.h>
+#include <linux/compiler.h>
 #include <linux/errno.h>
 #include <linux/extcon-provider.h>
 #include <linux/extcon.h>
 #include <linux/kernel.h>
+#include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
@@ -25,17 +27,29 @@
 #include <linux/slab.h>
 #include <linux/reboot.h>
 #include <linux/regulator/driver.h>
+#include <linux/workqueue.h>
 #include <linux/util_macros.h>
 #include <soc/qcom/pmic-sec-write.h>
 
 #include "qcom-smbchg.h"
 
-#define SMBCHG_CTO_STATE_ACTIVE              BIT(0)
-#define SMBCHG_CTO_STATE_PREV_USB_ENABLED    BIT(1)
-#define SMBCHG_CTO_STATE_PREV_ILIM_VALID     BIT(2)
+static void smbchg_put_batt_info(void *data)
+{
+        struct smbchg_chip *chip = data;
+
+        if (!chip->usb_psy || !chip->batt_info)
+                return;
+
+        power_supply_put_battery_info(chip->usb_psy, chip->batt_info);
+}
 
 #define SMBCHG_PROP_ALLOW_CHARGE_WHILE_OTG   "qcom,allow-charge-while-otg"
 #define SMBCHG_PROP_OTG_CHARGE_ICL_UA        "qcom,otg-charge-icl-ua"
+#define SMBCHG_PROP_OTG_POLICY_DEBOUNCE_MS   "qcom,otg-policy-debounce-ms"
+
+#define SMBCHG_POLICY_DEBOUNCE_DEFAULT_MS    150
+#define SMBCHG_POLICY_DEBOUNCE_MIN_MS        50
+#define SMBCHG_POLICY_DEBOUNCE_MAX_MS        500
 
 #ifndef SMBCHG_DEFAULT_OTG_CHARGE_ICL
 #define SMBCHG_DEFAULT_OTG_CHARGE_ICL 500000 /* 500 mA default */
@@ -712,135 +726,319 @@ static bool smbchg_otg_is_present(struct smbchg_chip *chip)
 	return (value & RID_MASK) == 0;
 }
 
-/* ===== Charge-through while OTG host (safe mode) =====
- * If ID is grounded (host mode) AND USB VBUS is externally present,
- * do NOT source VBUS. Instead, enable the USB sink path and set a
- * conservative ICL so the PMIC can charge from the external source.
- * This behavior is gated by allow_charge_while_otg (sysfs/DT).
- */
+/* ===== Combined extcon policy ===== */
 
-static bool smbchg_is_charge_through_otg(struct smbchg_chip *chip)
+static int smbchg_set_otg_vbus(struct smbchg_chip *chip, bool enable)
 {
-	if (!chip->allow_charge_while_otg)
-	        return false;
-
-	/* Host cable present AND external VBUS present */
-	return smbchg_otg_is_present(chip) && smbchg_usb_is_present(chip);
-}
-
-static void smbchg_update_charge_through_otg(struct smbchg_chip *chip)
-{
-	u32 target_ua;
-	unsigned int value;
-	bool should_charge;
 	int ret;
 
-	mutex_lock(&chip->otg_charge_lock);
+	dev_dbg(chip->dev, "%sabling OTG VBUS regulator\n", enable ? "En" : "Dis");
 
-	should_charge = smbchg_is_charge_through_otg(chip);
-
-	if (!should_charge) {
-		if (!(chip->otg_charge_state & SMBCHG_CTO_STATE_ACTIVE))
-			goto out_unlock;
-
-		/* Restore previous sink state */
-		ret = smbchg_usb_enable(chip,
-					(chip->otg_charge_state &
-					 SMBCHG_CTO_STATE_PREV_USB_ENABLED) ?
-					chip->otg_charge_prev_usb_enabled :
-					false);
-		if (ret)
-			dev_warn(chip->dev,
-				 "OTG+charge: restore USB path failed: %pe\n",
-				 ERR_PTR(ret));
-
-		/* Restore previous input current limit if known */
-		if (chip->otg_charge_state & SMBCHG_CTO_STATE_PREV_ILIM_VALID) {
-			ret = smbchg_usb_set_ilim(chip,
-						chip->otg_charge_prev_icl_ua);
-			if (ret < 0)
-				dev_warn(chip->dev,
-					 "OTG+charge: restore ICL failed: %pe\n",
-					 ERR_PTR(ret));
-		}
-
-		chip->otg_charge_state = 0;
-		goto out_unlock;
-	}
-
-	if (!(chip->otg_charge_state & SMBCHG_CTO_STATE_ACTIVE)) {
-		ret = regmap_read(chip->regmap,
-					 chip->base + SMBCHG_USBIN_CMD_IL,
-					 &value);
-		if (ret)
-			dev_warn(chip->dev,
-				 "OTG+charge: read USB cmd failed: %pe\n",
-				 ERR_PTR(ret));
-		else {
-			chip->otg_charge_prev_usb_enabled =
-				!(value & USBIN_SUSPEND_BIT);
-			chip->otg_charge_state |=
-				SMBCHG_CTO_STATE_PREV_USB_ENABLED;
-		}
-
-		ret = smbchg_usb_get_ilim(chip);
-		if (ret >= 0) {
-			chip->otg_charge_prev_icl_ua = ret;
-			chip->otg_charge_state |=
-				SMBCHG_CTO_STATE_PREV_ILIM_VALID;
-		} else {
-			chip->otg_charge_state &=
-				~SMBCHG_CTO_STATE_PREV_ILIM_VALID;
-			dev_dbg(chip->dev,
-				 "OTG+charge: previous ICL unavailable: %pe\n",
-				 ERR_PTR(ret));
-		}
-	}
-
-	/* Ensure we are NOT sourcing VBUS */
 	ret = regmap_update_bits(chip->regmap,
-					 chip->base + SMBCHG_BAT_IF_CMD_CHG,
-					 OTG_EN_BIT, 0);
+			 chip->base + SMBCHG_BAT_IF_CMD_CHG, OTG_EN_BIT,
+			 enable ? OTG_EN_BIT : 0);
 	if (ret)
-		dev_warn(chip->dev,
-			 "OTG+charge: disable OTG source failed: %pe\n",
-			 ERR_PTR(ret));
+		dev_warn_ratelimited(chip->dev,
+                                     "Failed to %sable OTG regulator: %pe\n",
+                                     enable ? "en" : "dis", ERR_PTR(ret));
 
-	/* Enable sink path and apply ICL */
-	ret = smbchg_usb_enable(chip, true);
-	if (ret)
-		dev_warn(chip->dev,
-			 "OTG+charge: enable USB sink failed: %pe\n",
+	return ret;
+}
+
+static void smbchg_save_usb_path(struct smbchg_chip *chip)
+{
+	unsigned int value;
+	int ret;
+
+	chip->cto_prev_usb_valid = false;
+	chip->cto_prev_icl_valid = false;
+
+	ret = regmap_read(chip->regmap,
+			 chip->base + SMBCHG_USBIN_CMD_IL,
+			 &value);
+	if (ret) {
+		dev_dbg(chip->dev,
+			 "OTG policy: read USB cmd failed: %pe\n",
 			 ERR_PTR(ret));
+	} else {
+		chip->cto_prev_usb_enabled = !(value & USBIN_SUSPEND_BIT);
+		chip->cto_prev_usb_valid = true;
+	}
+
+	ret = smbchg_usb_get_ilim(chip);
+	if (ret >= 0) {
+		chip->cto_prev_icl_ua = ret;
+		chip->cto_prev_icl_valid = true;
+	} else if (ret != -EOPNOTSUPP) {
+		dev_dbg(chip->dev,
+			 "OTG policy: previous ICL unavailable: %pe\n",
+			 ERR_PTR(ret));
+	}
+}
+
+static int smbchg_restore_usb_path(struct smbchg_chip *chip)
+{
+	int ret;
+	int rc = 0;
+
+	if (chip->cto_prev_usb_valid) {
+		ret = smbchg_usb_enable(chip, chip->cto_prev_usb_enabled);
+		if (ret) {
+			dev_warn(chip->dev,
+				"OTG policy: restore USB path failed: %pe\n",
+				ERR_PTR(ret));
+			if (!rc)
+				rc = ret;
+		}
+	}
+
+	if (chip->cto_prev_icl_valid) {
+		ret = smbchg_usb_set_ilim(chip, chip->cto_prev_icl_ua);
+		if (ret < 0) {
+			dev_warn(chip->dev,
+				"OTG policy: restore ICL failed: %pe\n",
+				ERR_PTR(ret));
+			if (!rc)
+				rc = ret;
+		}
+	}
+
+	chip->cto_prev_usb_valid = false;
+	chip->cto_prev_icl_valid = false;
+
+	return rc;
+}
+
+static int smbchg_apply_charge_through_current(struct smbchg_chip *chip)
+{
+	u32 target_ua;
+	int ret;
 
 	target_ua = chip->otg_charge_icl_ua ? chip->otg_charge_icl_ua :
-			 SMBCHG_DEFAULT_OTG_CHARGE_ICL;
+		SMBCHG_DEFAULT_OTG_CHARGE_ICL;
 	ret = smbchg_usb_set_ilim(chip, target_ua);
 	if (ret < 0)
-		dev_warn(chip->dev,
-			 "OTG+charge: set ICL failed: %pe\n",
-			 ERR_PTR(ret));
+		dev_warn_ratelimited(chip->dev,
+                                     "OTG policy: set ICL failed: %pe\n",
+                                     ERR_PTR(ret));
 
-	chip->otg_charge_state |= SMBCHG_CTO_STATE_ACTIVE;
+	return ret;
+}
 
-out_unlock:
-	mutex_unlock(&chip->otg_charge_lock);
+
+static const char *smbchg_mode_name(enum smbchg_mode mode)
+{
+	static const char *const names[] = {
+		[SMBCHG_MODE_NONE]	= "none",
+		[SMBCHG_MODE_SINK]	= "sink",
+		[SMBCHG_MODE_SOURCE] = "source",
+		[SMBCHG_MODE_CHARGE_THROUGH] = "charge-through",
+	};
+
+	if (mode < 0 || mode >= ARRAY_SIZE(names) || !names[mode])
+		return "unknown";
+
+	return names[mode];
+}
+
+
+static int smbchg_transition_mode(struct smbchg_chip *chip,
+				       enum smbchg_mode from, enum smbchg_mode to)
+{
+	int ret;
+	int rc = 0;
+
+	if (from == to)
+		return 0;
+
+	if (from == SMBCHG_MODE_CHARGE_THROUGH &&
+	    to != SMBCHG_MODE_CHARGE_THROUGH) {
+		ret = smbchg_restore_usb_path(chip);
+		if (ret && !rc)
+			rc = ret;
+	}
+
+	switch (to) {
+	case SMBCHG_MODE_CHARGE_THROUGH:
+		smbchg_save_usb_path(chip);
+		ret = smbchg_set_otg_vbus(chip, false);
+		if (ret && !rc)
+			rc = ret;
+		ret = smbchg_usb_enable(chip, true);
+		if (ret) {
+			dev_warn(chip->dev,
+				 "OTG policy: enable USB sink failed: %pe\n",
+				 ERR_PTR(ret));
+			if (!rc)
+				rc = ret;
+		}
+		ret = smbchg_apply_charge_through_current(chip);
+		if (ret && !rc)
+			rc = ret;
+		break;
+	case SMBCHG_MODE_SOURCE:
+		ret = smbchg_usb_enable(chip, false);
+		if (ret && !rc)
+			rc = ret;
+		ret = smbchg_set_otg_vbus(chip, true);
+		if (ret && !rc)
+			rc = ret;
+		break;
+	case SMBCHG_MODE_SINK:
+		ret = smbchg_set_otg_vbus(chip, false);
+		if (ret && !rc)
+			rc = ret;
+		ret = smbchg_usb_enable(chip, true);
+		if (ret && !rc)
+			rc = ret;
+		break;
+	case SMBCHG_MODE_NONE:
+	default:
+		ret = smbchg_usb_enable(chip, false);
+		if (ret && !rc)
+			rc = ret;
+		ret = smbchg_set_otg_vbus(chip, false);
+		if (ret && !rc)
+			rc = ret;
+		break;
+	}
+
+        return rc;
+}
+
+static int smbchg_apply_mode(struct smbchg_chip *chip, enum smbchg_mode mode,
+                           bool *affects_sink)
+{
+        int ret;
+        int rc = 0;
+        enum smbchg_mode previous = chip->cur_mode;
+        bool sink_change = false;
+
+        if (previous == mode) {
+                if (mode == SMBCHG_MODE_CHARGE_THROUGH) {
+                        ret = smbchg_apply_charge_through_current(chip);
+                        if (ret < 0)
+                                rc = ret;
+                }
+                if (affects_sink)
+                        *affects_sink = false;
+                return rc;
+        }
+
+        rc = smbchg_transition_mode(chip, previous, mode);
+        if (rc) {
+                dev_err(chip->dev,
+                        "OTG policy: %s -> %s failed: %pe\n",
+                        smbchg_mode_name(previous),
+                        smbchg_mode_name(mode), ERR_PTR(rc));
+                ret = smbchg_transition_mode(chip, mode, previous);
+                if (ret)
+                        dev_warn(chip->dev,
+                                 "OTG policy: rollback to %s failed: %pe\n",
+                                 smbchg_mode_name(previous), ERR_PTR(ret));
+
+                if (affects_sink)
+                        *affects_sink = false;
+                return rc;
+        }
+
+        chip->cur_mode = mode;
+        dev_info_ratelimited(chip->dev, "OTG policy: %s -> %s\n",
+                             smbchg_mode_name(previous),
+                             smbchg_mode_name(mode));
+
+        if (previous == SMBCHG_MODE_SINK ||
+            previous == SMBCHG_MODE_CHARGE_THROUGH ||
+            mode == SMBCHG_MODE_SINK ||
+            mode == SMBCHG_MODE_CHARGE_THROUGH)
+                sink_change = previous != mode;
+
+        if (affects_sink)
+                *affects_sink = sink_change;
+
+        return 0;
+}
+
+static bool smbchg_extcon_state(struct smbchg_chip *chip, unsigned int id)
+{
+	int ret;
+
+	ret = extcon_get_state(chip->edev, id);
+	if (ret < 0) {
+		dev_dbg(chip->dev,
+			 "OTG policy: failed to read extcon %u: %pe\n",
+			 id, ERR_PTR(ret));
+		return false;
+	}
+
+	return ret;
+}
+
+static bool smbchg_extcon_usb_present(struct smbchg_chip *chip)
+{
+	return smbchg_extcon_state(chip, EXTCON_USB) ||
+		smbchg_extcon_state(chip, EXTCON_CHG_USB_SDP) ||
+		smbchg_extcon_state(chip, EXTCON_CHG_USB_CDP) ||
+		smbchg_extcon_state(chip, EXTCON_CHG_USB_DCP);
+}
+
+static int smbchg_update_policy(struct smbchg_chip *chip)
+{
+	bool host, usb;
+	enum smbchg_mode desired = SMBCHG_MODE_NONE;
+	bool notify = false;
+	int rc;
+
+	host = smbchg_extcon_state(chip, EXTCON_USB_HOST);
+	usb = smbchg_extcon_usb_present(chip);
+
+	mutex_lock(&chip->policy_lock);
+	if (host && usb && chip->allow_charge_while_otg)
+		desired = SMBCHG_MODE_CHARGE_THROUGH;
+	else if (host)
+		desired = SMBCHG_MODE_SOURCE;
+	else if (usb)
+		desired = SMBCHG_MODE_SINK;
+
+	rc = smbchg_apply_mode(chip, desired, &notify);
+	mutex_unlock(&chip->policy_lock);
+
+	if (!rc && notify && chip->usb_psy)
+		power_supply_changed(chip->usb_psy);
+
+	return rc;
+}
+
+
+static void smbchg_extcon_work(struct work_struct *work)
+{
+	struct smbchg_chip *chip = container_of(to_delayed_work(work),
+                                         struct smbchg_chip,
+                                         extcon_work);
+	int rc;
+
+	rc = smbchg_update_policy(chip);
+	if (rc)
+		dev_err(chip->dev, "OTG policy: extcon update failed: %pe\n",
+			ERR_PTR(rc));
 }
 
 static int smbchg_extcon_event(struct notifier_block *nb, unsigned long event,
-			       void *ptr)
+	       void *ptr)
 {
 	struct smbchg_chip *chip = container_of(nb, struct smbchg_chip,
-					      extcon_nb);
+					   extcon_nb);
 
 	switch (event) {
 	case EXTCON_USB:
 	case EXTCON_USB_HOST:
 	case EXTCON_CHG_USB_SDP:
-	case EXTCON_CHG_USB_DCP:
-	case EXTCON_CHG_USB_CDP:
-		smbchg_update_charge_through_otg(chip);
-		break;
+        case EXTCON_CHG_USB_DCP:
+        case EXTCON_CHG_USB_CDP:
+                mod_delayed_work(system_wq, &chip->extcon_work,
+                                 msecs_to_jiffies(READ_ONCE(
+                                         chip->policy_debounce_ms)));
+                break;
 	default:
 		break;
 	}
@@ -868,8 +1066,11 @@ static ssize_t allow_charge_while_otg_store(struct device *dev,
 	if (kstrtobool(buf, &v))
 		return -EINVAL;
 
+	mutex_lock(&chip->policy_lock);
 	chip->allow_charge_while_otg = v;
-	smbchg_update_charge_through_otg(chip);
+	mutex_unlock(&chip->policy_lock);
+
+	mod_delayed_work(system_wq, &chip->extcon_work, 0);
 
 	return count;
 }
@@ -898,27 +1099,63 @@ static ssize_t otg_charge_icl_ua_store(struct device *dev,
 	if (kstrtou32(buf, 0, &ua))
 		return -EINVAL;
 
+	mutex_lock(&chip->policy_lock);
 	chip->otg_charge_icl_ua = ua;
-
-	if (chip->otg_charge_state & SMBCHG_CTO_STATE_ACTIVE) {
+	if (chip->cur_mode == SMBCHG_MODE_CHARGE_THROUGH) {
 		target_ua = chip->otg_charge_icl_ua ? chip->otg_charge_icl_ua :
-			    SMBCHG_DEFAULT_OTG_CHARGE_ICL;
+                            SMBCHG_DEFAULT_OTG_CHARGE_ICL;
 		ret = smbchg_usb_set_ilim(chip, target_ua);
 		if (ret < 0)
 			dev_warn(chip->dev,
-				 "OTG+charge: update ICL failed: %pe\n",
-				 ERR_PTR(ret));
-	} else {
-		smbchg_update_charge_through_otg(chip);
+                                 "OTG policy: update ICL failed: %pe\n",
+                                 ERR_PTR(ret));
 	}
+	mutex_unlock(&chip->policy_lock);
 
 	return count;
 }
 static DEVICE_ATTR_RW(otg_charge_icl_ua);
 
+static ssize_t otg_policy_debounce_ms_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct smbchg_chip *chip = dev_get_drvdata(dev);
+	unsigned int debounce_ms;
+
+	mutex_lock(&chip->policy_lock);
+	debounce_ms = chip->policy_debounce_ms;
+	mutex_unlock(&chip->policy_lock);
+
+	return sysfs_emit(buf, "%u\n", debounce_ms);
+}
+
+static ssize_t otg_policy_debounce_ms_store(struct device *dev,
+	struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct smbchg_chip *chip = dev_get_drvdata(dev);
+	unsigned int debounce_ms;
+
+	if (kstrtouint(buf, 0, &debounce_ms))
+		return -EINVAL;
+
+	debounce_ms = clamp_t(unsigned int, debounce_ms,
+				 SMBCHG_POLICY_DEBOUNCE_MIN_MS,
+				 SMBCHG_POLICY_DEBOUNCE_MAX_MS);
+
+	mutex_lock(&chip->policy_lock);
+	chip->policy_debounce_ms = debounce_ms;
+	mutex_unlock(&chip->policy_lock);
+
+	mod_delayed_work(system_wq, &chip->extcon_work, 0);
+
+	return count;
+}
+static DEVICE_ATTR_RW(otg_policy_debounce_ms);
+
 static struct attribute *smbchg_cto_attrs[] = {
 	&dev_attr_allow_charge_while_otg.attr,
 	&dev_attr_otg_charge_icl_ua.attr,
+	&dev_attr_otg_policy_debounce_ms.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(smbchg_cto);
@@ -932,28 +1169,32 @@ ATTRIBUTE_GROUPS(smbchg_cto);
 static int smbchg_otg_enable(struct regulator_dev *rdev)
 {
 	struct smbchg_chip *chip = rdev_get_drvdata(rdev);
-	int ret;
+	bool notify = false;
+	int rc;
 
-	dev_dbg(chip->dev, "Enabling OTG VBUS regulator");
+        dev_dbg(chip->dev, "Enabling OTG VBUS regulator\n");
 
-	/* If external VBUS is present while in host mode, do NOT source VBUS */
-	if (smbchg_is_charge_through_otg(chip)) {
+	rc = smbchg_update_policy(chip);
+	if (rc)
+		return rc;
+
+	mutex_lock(&chip->policy_lock);
+	if (chip->cur_mode == SMBCHG_MODE_CHARGE_THROUGH) {
 		dev_info(chip->dev,
-			 "OTG+charge: external VBUS present; not sourcing\n");
-		/* Apply sink path + ICL policy so host mode still works safely */
-		smbchg_update_charge_through_otg(chip);
-		return 0; /* pretend success, keeps host stack happy */
+			"OTG policy: external VBUS present; not sourcing\n");
+		mutex_unlock(&chip->policy_lock);
+		return 0;
 	}
 
-	ret = regmap_update_bits(chip->regmap,
-			         chip->base + SMBCHG_BAT_IF_CMD_CHG, OTG_EN_BIT,
-			         OTG_EN_BIT);
-	if (ret)
-		dev_err(chip->dev, "Failed to enable OTG regulator: %pe\n",
-			ERR_PTR(ret));
+	rc = smbchg_apply_mode(chip, SMBCHG_MODE_SOURCE, &notify);
+	mutex_unlock(&chip->policy_lock);
 
-	return ret;
+	if (!rc && notify && chip->usb_psy)
+		power_supply_changed(chip->usb_psy);
+
+	return rc;
 }
+
 
 /**
  * @brief smbchg_otg_disable() - Disable OTG regulator
@@ -964,21 +1205,30 @@ static int smbchg_otg_enable(struct regulator_dev *rdev)
 static int smbchg_otg_disable(struct regulator_dev *rdev)
 {
 	struct smbchg_chip *chip = rdev_get_drvdata(rdev);
-	int ret;
+	bool host, usb;
+	bool notify = false;
+	int rc = 0;
 
-	dev_dbg(chip->dev, "Disabling OTG VBUS regulator");
+        dev_dbg(chip->dev, "Disabling OTG VBUS regulator\n");
 
-	ret = regmap_update_bits(chip->regmap,
-				 chip->base + SMBCHG_BAT_IF_CMD_CHG, OTG_EN_BIT,
-				 0);
-	if (ret) {
-		dev_err(chip->dev, "Failed to disable OTG regulator: %pe\n",
-			ERR_PTR(ret));
-		return ret;
-	}
+	mutex_lock(&chip->policy_lock);
+	host = smbchg_extcon_state(chip, EXTCON_USB_HOST);
+	usb = smbchg_extcon_usb_present(chip);
+	if (host && usb && chip->allow_charge_while_otg)
+		rc = smbchg_apply_mode(chip, SMBCHG_MODE_CHARGE_THROUGH,
+                                       &notify);
+	else if (usb)
+		rc = smbchg_apply_mode(chip, SMBCHG_MODE_SINK, &notify);
+	else
+		rc = smbchg_apply_mode(chip, SMBCHG_MODE_NONE, &notify);
+	mutex_unlock(&chip->policy_lock);
 
-	return 0;
+	if (!rc && notify && chip->usb_psy)
+		power_supply_changed(chip->usb_psy);
+
+	return rc;
 }
+
 
 /**
  * @brief smbchg_otg_is_enabled() - Check if OTG regulator is enabled
@@ -994,8 +1244,11 @@ static int smbchg_otg_is_enabled(struct regulator_dev *rdev)
 
 	ret = regmap_read(chip->regmap, chip->base + SMBCHG_BAT_IF_CMD_CHG,
 			  &value);
-	if (ret)
-		dev_err(chip->dev, "Failed to read OTG regulator status\n");
+	if (ret) {
+		dev_err(chip->dev, "Failed to read OTG regulator status: %pe\n",
+			ERR_PTR(ret));
+		return ret;
+	}
 
 	return !!(value & OTG_EN_BIT);
 }
@@ -1211,8 +1464,9 @@ static irqreturn_t smbchg_handle_usb_source_detect(int irq, void *data)
 	}
 
 	smbchg_extcon_update(chip);
-	smbchg_update_charge_through_otg(chip);
-	power_supply_changed(chip->usb_psy);
+	mod_delayed_work(system_wq, &chip->extcon_work,
+                         msecs_to_jiffies(READ_ONCE(
+                                 chip->policy_debounce_ms)));
 
 	return IRQ_HANDLED;
 }
@@ -1234,7 +1488,9 @@ static irqreturn_t smbchg_handle_usbid_change(int irq, void *data)
 	dev_dbg(chip->dev, "OTG %spresent\n", otg_present ? "" : "not ");
 
 	smbchg_extcon_update(chip);
-	smbchg_update_charge_through_otg(chip);
+	mod_delayed_work(system_wq, &chip->extcon_work,
+                         msecs_to_jiffies(READ_ONCE(
+                                 chip->policy_debounce_ms)));
 
 	return IRQ_HANDLED;
 }
@@ -1739,10 +1995,11 @@ static int smbchg_init(struct smbchg_chip *chip)
 
 static int smbchg_probe(struct platform_device *pdev)
 {
-	struct smbchg_chip *chip;
-	struct regulator_config config = {};
-	struct power_supply_config supply_config = {};
-	int i, irq, ret;
+        struct smbchg_chip *chip;
+        struct regulator_config config = {};
+        struct power_supply_config supply_config = {};
+        u32 debounce_ms;
+        int i, irq, ret;
 
 	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
 	if (!chip)
@@ -1765,7 +2022,13 @@ static int smbchg_probe(struct platform_device *pdev)
 
 	spin_lock_init(&chip->sec_access_lock);
 	INIT_WORK(&chip->otg_reset_work, smbchg_otg_reset_worker);
-	mutex_init(&chip->otg_charge_lock);
+	mutex_init(&chip->policy_lock);
+	INIT_DELAYED_WORK(&chip->extcon_work, smbchg_extcon_work);
+
+        chip->cur_mode = SMBCHG_MODE_NONE;
+        chip->policy_debounce_ms = SMBCHG_POLICY_DEBOUNCE_DEFAULT_MS;
+        chip->cto_prev_usb_valid = false;
+        chip->cto_prev_icl_valid = false;
 
 	/* Initialize OTG regulator */
 	chip->otg_rdesc.id = -1;
@@ -1788,13 +2051,20 @@ static int smbchg_probe(struct platform_device *pdev)
 	}
 
 	/* Charge-through OTG: defaults + DT */
-        chip->allow_charge_while_otg =
-                of_property_read_bool(pdev->dev.of_node,
+	chip->allow_charge_while_otg =
+		of_property_read_bool(pdev->dev.of_node,
                                       SMBCHG_PROP_ALLOW_CHARGE_WHILE_OTG);
         if (of_property_read_u32(pdev->dev.of_node,
                                  SMBCHG_PROP_OTG_CHARGE_ICL_UA,
                                  &chip->otg_charge_icl_ua))
                 chip->otg_charge_icl_ua = SMBCHG_DEFAULT_OTG_CHARGE_ICL;
+
+        if (!of_property_read_u32(pdev->dev.of_node,
+                                  SMBCHG_PROP_OTG_POLICY_DEBOUNCE_MS,
+                                  &debounce_ms))
+                chip->policy_debounce_ms = clamp_t(u32, debounce_ms,
+                                                   SMBCHG_POLICY_DEBOUNCE_MIN_MS,
+                                                   SMBCHG_POLICY_DEBOUNCE_MAX_MS);
 
 	/* Create sysfs group for charge-through controls */
 	if (sysfs_create_groups(&pdev->dev.kobj, smbchg_cto_groups))
@@ -1813,15 +2083,23 @@ static int smbchg_probe(struct platform_device *pdev)
 		return PTR_ERR(chip->usb_psy);
 	}
 
-	ret = power_supply_get_battery_info(chip->usb_psy, &chip->batt_info);
-	if (ret) {
-		dev_err(chip->dev, "Failed to get battery info: %pe\n",
-			ERR_PTR(ret));
-		return ret;
-	}
+        ret = power_supply_get_battery_info(chip->usb_psy, &chip->batt_info);
+        if (ret) {
+                dev_err(chip->dev, "Failed to get battery info: %pe\n",
+                        ERR_PTR(ret));
+                return ret;
+        }
 
-	if (chip->batt_info->voltage_max_design_uv == -EINVAL) {
-		dev_err(chip->dev,
+        ret = devm_add_action_or_reset(chip->dev, smbchg_put_batt_info, chip);
+        if (ret) {
+                dev_err(chip->dev,
+                        "Failed to register battery info cleanup: %pe\n",
+                        ERR_PTR(ret));
+                return ret;
+        }
+
+        if (chip->batt_info->voltage_max_design_uv == -EINVAL) {
+                dev_err(chip->dev,
 			"Battery info missing maximum design voltage\n");
 		return -EINVAL;
 	}
@@ -1854,12 +2132,12 @@ static int smbchg_probe(struct platform_device *pdev)
 	extcon_set_property_capability(chip->edev, EXTCON_USB_HOST,
 			       EXTCON_PROP_USB_VBUS);
 
-	chip->extcon_nb.notifier_call = smbchg_extcon_event;
-	ret = devm_extcon_register_notifier_all(chip->dev, chip->edev,
-					       &chip->extcon_nb);
-	if (ret)
-		dev_warn(chip->dev, "Failed to register extcon notifier: %pe\n",
-			 ERR_PTR(ret));
+        chip->extcon_nb.notifier_call = smbchg_extcon_event;
+        ret = devm_extcon_register_notifier_all(chip->dev, chip->edev,
+                                                &chip->extcon_nb);
+        if (ret)
+                dev_warn(chip->dev, "Failed to register extcon notifier: %pe\n",
+                         ERR_PTR(ret));
 
 	/* Initialize charger */
 	ret = smbchg_init(chip);
@@ -1893,18 +2171,20 @@ static int smbchg_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, chip);
 
 	/* Enforce policy if we boot with host+VBUS already present */
-	smbchg_update_charge_through_otg(chip);
+	mod_delayed_work(system_wq, &chip->extcon_work, 0);
+	flush_delayed_work(&chip->extcon_work);
 
 	return 0;
 }
 
 static void smbchg_remove(struct platform_device *pdev)
 {
-	struct smbchg_chip *chip = platform_get_drvdata(pdev);
+        struct smbchg_chip *chip = platform_get_drvdata(pdev);
 
-	sysfs_remove_groups(&pdev->dev.kobj, smbchg_cto_groups);
-	smbchg_usb_enable(chip, false);
-	smbchg_charging_enable(chip, false);
+        cancel_delayed_work_sync(&chip->extcon_work);
+        sysfs_remove_groups(&pdev->dev.kobj, smbchg_cto_groups);
+        smbchg_usb_enable(chip, false);
+        smbchg_charging_enable(chip, false);
 }
 
 static const struct of_device_id smbchg_id_table[] = {
